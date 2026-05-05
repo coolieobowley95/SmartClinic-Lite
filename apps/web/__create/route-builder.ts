@@ -1,6 +1,6 @@
 import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Hono } from 'hono';
 import type { Handler } from 'hono/types';
 import updatedFetch from '../src/__create/fetch';
@@ -44,8 +44,8 @@ async function findRouteFiles(dir: string): Promise<string[]> {
 
 // Helper function to transform file path to Hono route path
 function getHonoPath(routeFile: string): { name: string; pattern: string }[] {
-  const relativePath = routeFile.replace(__dirname, '');
-  const parts = relativePath.split('/').filter(Boolean);
+  const relativePath = relative(__dirname, routeFile);
+  const parts = relativePath.split(sep).filter(Boolean);
   const routeParts = parts.slice(0, -1); // Remove 'route.js'
   if (routeParts.length === 0) {
     return [{ name: 'root', pattern: '' }];
@@ -81,7 +81,15 @@ async function registerRoutes() {
 
   for (const routeFile of routeFiles) {
     try {
-      const route = await import(/* @vite-ignore */ `${routeFile}?update=${Date.now()}`);
+      // Vite's SSR runner expects a URL-like specifier. Absolute Windows paths
+      // (e.g. "C:\\...") are not valid ESM import specifiers.
+      const routeUrl = pathToFileURL(routeFile).href;
+      const routeFs = `/@fs/${routeFile.replaceAll('\\', '/')}`;
+
+      const importRoute = async (specifierBase: string) =>
+        await import(/* @vite-ignore */ `${specifierBase}?update=${Date.now()}`);
+
+      const route = await importRoute(routeUrl).catch(() => importRoute(routeFs));
 
       const methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
       for (const method of methods) {
@@ -92,9 +100,7 @@ async function registerRoutes() {
             const handler: Handler = async (c) => {
               const params = c.req.param();
               if (import.meta.env.DEV) {
-                const updatedRoute = await import(
-                  /* @vite-ignore */ `${routeFile}?update=${Date.now()}`
-                );
+                const updatedRoute = await importRoute(routeUrl).catch(() => importRoute(routeFs));
                 return await updatedRoute[method](c.req.raw, { params });
               }
               return await route[method](c.req.raw, { params });
